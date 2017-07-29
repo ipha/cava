@@ -54,6 +54,17 @@
 #include "input/pulse.c"
 #endif
 
+#ifdef XLIB
+#include "output/graphical.h"
+#include "output/graphical_x.c"
+#include "output/graphical_x.h"
+#endif
+
+#ifdef SDL
+#include "output/graphical.h"
+#include "output/graphical_sdl.c"
+#include "output/graphical_sdl.h"
+#endif
 
 #include <iniparser.h>
 
@@ -69,12 +80,13 @@
 struct termios oldtio, newtio;
 int rc;
 
+dictionary *ini;
 char *inputMethod, *outputMethod, *modeString, *color, *bcolor, *style, *raw_target, *data_format;
 // *bar_delim, *frame_delim ;
 char *gradient_color_1;
 char *gradient_color_2;
 double monstercat, integral, gravity, ignore, smh, sens;
-int fixedbars, framerate, bw, bs, autosens, overshoot;
+int fixedbars, framerate, bw, bs, set_win_props, autosens, overshoot;
 unsigned int lowcf, highcf;
 double smoothDef[64] = {0.8, 0.8, 1, 1, 0.8, 0.8, 1, 0.8, 0.8, 1, 1, 0.8,
 					1, 1, 0.8, 0.6, 0.6, 0.7, 0.8, 0.8, 0.8, 0.8, 0.8,
@@ -109,14 +121,28 @@ int sourceIsAuto = 1;
 // whether we should reload the config or not
 int should_reload = 0;
 
-
 // general: cleanup
 void cleanup(void)
 {
-	#ifdef NCURSES
-	cleanup_terminal_ncurses();
-	#endif
-	cleanup_terminal_noncurses();
+	if(om != 5 && om != 6)
+	{
+		#ifdef NCURSES
+		cleanup_terminal_ncurses();
+		#endif
+		cleanup_terminal_noncurses();
+	}
+	else if (om == 5)
+	{
+		#ifdef XLIB
+		cleanup_graphical_x();
+		#endif
+	}
+	else if (om == 6)
+	{
+		#ifdef SDL
+		cleanup_graphical_sdl();
+		#endif
+	}
 }
 
 // general: handle signals
@@ -138,7 +164,7 @@ void sig_handler(int sig_no)
 void load_config(char configPath[255])
 {
 
-FILE *fp;
+	FILE *fp;
 	
 	//config: creating path to default config file
 	if (configPath[0] == '\0') {
@@ -231,6 +257,17 @@ FILE *fp;
 	lowcf = iniparser_getint(ini, "general:lower_cutoff_freq", 50);
 	highcf = iniparser_getint(ini, "general:higher_cutoff_freq", 10000);
 
+    // config: window
+	w = iniparser_getint(ini, "window:width", 640);
+	h = iniparser_getint(ini, "window:height", 480);
+	windowAlignment = (char *)iniparser_getstring(ini, "window:alignment", "none");
+	windowX = iniparser_getint(ini, "window:x_padding", 0);
+	windowY = iniparser_getint(ini, "window:y_padding", 0);
+	fs = iniparser_getboolean(ini, "window:fullscreen", FALSE);
+	transparentFlag = iniparser_getboolean(ini, "window:transparency", FALSE);
+	borderFlag = iniparser_getboolean(ini, "window:border", TRUE);
+	keepInBottom = iniparser_getboolean(ini, "window:keep_below", FALSE);
+
     // config: output
 	style =  (char *)iniparser_getstring(ini, "output:style", "stereo");
 	raw_target = (char *)iniparser_getstring(ini, "output:raw_target", "/dev/stdout");
@@ -274,7 +311,6 @@ FILE *fp;
 		im = 3;
 		audio.source = (char *)iniparser_getstring(ini, "input:source", "auto");
 	}
-
 }
 
 int validate_color(char *checkColor, int om)
@@ -282,8 +318,8 @@ int validate_color(char *checkColor, int om)
 	int validColor = 0;
 	if (checkColor[0] == '#' && strlen(checkColor) == 7) {
 		// If the output mode is not ncurses, tell the user to use a named colour instead of hex colours.
-		if (om != 1 && om != 2) {
-			fprintf(stderr, "Only 'ncurses' output method supports HTML colors. Please change the colours or the output method.\n");
+		if (om != 1 && om != 2 && om != 5 && om != 6) {
+			fprintf(stderr, "Only 'ncurses', 'sdl' and 'x' output method supports HTML colors. Please change the colours or the output method.\n");
 			exit(EXIT_FAILURE);
 		}
 		// 0 to 9 and a to f
@@ -397,24 +433,42 @@ void validate_config()
 		exit(EXIT_FAILURE);
 		
 		}
-
-
-
+	}
+	if(strcmp(outputMethod, "x") == 0)
+	{
+		om = 5;
+		#ifndef XLIB
+			fprintf(stderr,
+				"cava was built without Xlib support, install Xlib dev files and run make clean && ./configure && make again\n");
+			exit(EXIT_FAILURE);
+		#endif
+	}
+	if(strcmp(outputMethod, "sdl") == 0)
+	{
+		om = 6;
+		#ifndef SDL
+			fprintf(stderr,
+				"cava was build without SDL2 support, install SDL2 dev files and run make clean && ./configure && make again\n");
+			exit(EXIT_FAILURE);
+		#endif
 	}
 	if (om == 0) {
-		#ifndef NCURSES
 		fprintf(stderr,
-			"output method %s is not supported, supported methods are: 'noncurses'\n",
+			"output method %s is not supported, supported methods are: 'noncurses'",
 						outputMethod);
-		exit(EXIT_FAILURE);
+		#ifdef XLIB
+			fprintf(stderr, ", 'x'");
 		#endif
-
+		#ifdef SDL
+			fprintf(stderr, ", 'sdl'");
+		#endif
 		#ifdef NCURSES
-                fprintf(stderr,
-                        "output method %s is not supported, supported methods are: 'ncurses' and 'noncurses'\n",
-                                                outputMethod);
-                exit(EXIT_FAILURE);
-		#endif	
+			fprintf(stderr, ", 'ncurses'");
+		#endif
+		// Just a quick question, should you add 'circle' and 'raw' here?
+		fprintf(stderr, "\n");
+
+		exit(EXIT_FAILURE);	
 	}
 
 	// validate: output style
@@ -467,7 +521,6 @@ void validate_config()
 	}
 
 	// In case color is not html format set bgcol and col to predefinedint values
-
 	if (strcmp(color, "black") == 0) col = 0;
 	if (strcmp(color, "red") == 0) col = 1;
 	if (strcmp(color, "green") == 0) col = 2;
@@ -488,7 +541,6 @@ void validate_config()
 	if (strcmp(bcolor, "cyan") == 0) bgcol = 6;
 	if (strcmp(bcolor, "white") == 0) bgcol = 7;
 	// default if invalid
-	
 
 	// validate: gravity
 	if (gravity < 0) {
@@ -513,7 +565,29 @@ void validate_config()
 	//setting sens
 	sens = sens / 100;
 
+	// validate: window settings
+	if(om == 5 || om == 6)
+	{
+		// validate: alignment
+		if(strcmp(windowAlignment, "top_left"))
+		if(strcmp(windowAlignment, "top_right"))
+		if(strcmp(windowAlignment, "bottom_left"))
+		if(strcmp(windowAlignment, "bottom_right"))
+		if(strcmp(windowAlignment, "left"))
+		if(strcmp(windowAlignment, "right"))
+		if(strcmp(windowAlignment, "top"))
+		if(strcmp(windowAlignment, "bottom"))
+		if(strcmp(windowAlignment, "center"))
+		if(strcmp(windowAlignment, "none"))
+			fprintf(stderr, "The value for alignment is invalid, '%s'!", windowAlignment);
 
+		// Get bar settings
+		bw = iniparser_getint(ini, "window:bar_width", 20);
+		bs = iniparser_getint(ini, "window:bar_spacing", 4);
+		
+		// Set window properties
+		set_win_props = iniparser_getint(ini, "window:set_win_props", 0);
+	}
 }
 
 #ifdef ALSA
@@ -624,7 +698,7 @@ int main(int argc, char **argv)
 	int flast[200];
 	int flastd[200];
 	int sleep = 0;
-	int i, n, o, height, h, w, c, rest, inAtty, silence, fp, fptest;
+	int i, n, o, height, c, rest, inAtty, silence, fp, fptest;
 	float temp;
 	//int cont = 1;
 	int fall[200];
@@ -707,7 +781,7 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 	load_config(configPath);
     validate_config();	
 
-	if (om != 4) { 
+	if ((om != 4) && (om != 5)) { 
 		// Check if we're running in a Virtual console todo: replace virtual console with terminal emulator
 		inAtty = 0;
 		if (strncmp(ttyname(0), "/dev/tty", 8) == 0 || strcmp(ttyname(0), "/dev/console") == 0) inAtty = 1;
@@ -801,6 +875,16 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 	bool reloadConf = FALSE;
 	bool senseLow = TRUE;
 
+	// open XLIB window and set everything up
+	#ifdef XLIB
+	if(om == 5) if(init_window_x(color, bcolor, col, bgcol, set_win_props, argv, argc, gradient, gradient_color_1, gradient_color_2)) exit(EXIT_FAILURE);
+	#endif
+
+	// setting up sdl
+	#ifdef SDL
+	if(om == 6) if(init_window_sdl(&col, &bgcol, color, bcolor, gradient, gradient_color_1, gradient_color_2)) exit(EXIT_FAILURE);
+	#endif
+
 	while  (!reloadConf) {//jumbing back to this loop means that you resized the screen
 		for (i = 0; i < 200; i++) {
 			flast[i] = 0;
@@ -854,6 +938,14 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 			h = 112;
 			w = 200;	
 		}
+
+		// draw X11 background
+		#ifdef XLIB
+		if(om == 5) apply_window_settings_x();
+		#endif
+		#ifdef SDL
+		if(om == 6) apply_window_settings_sdl(bgcol);
+		#endif
 
  		//handle for user setting too many bars
 		if (fixedbars) {
@@ -939,57 +1031,102 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 		while  (!resizeTerminal) {
 
 			// general: keyboard controls
-			#ifdef NCURSES
-			if (om == 1 || om == 2) ch = getch();
-			#endif
+			if(om != 5 || om != 6){
+				#ifdef NCURSES
+				if (om == 1 || om == 2) ch = getch();
+				#endif
 
-			switch (ch) {
-				case 65:    // key up
-					sens = sens * 1.05;
-					break;
-				case 66:    // key down
-					sens = sens * 0.95;
-					break;
-				case 68:    // key right
-					bw++;
-					resizeTerminal = TRUE;
-					break;
-				case 67:    // key left
-					if (bw > 1) bw--;
-					resizeTerminal = TRUE;
-					break;
-				case 'm':
-					if (mode == modes) {
-						mode = 1;
-					} else {
-						mode++;
-					}
-					break;
-				case 'r': //reload config
-					should_reload = 1;
-					break;
-				case 'c': //change forground color
-					if (col < 7) col++;
-					else col = 0;
-					resizeTerminal = TRUE;
-					break;
-				case 'b': //change backround color
-					if (bgcol < 7) bgcol++;
-					else bgcol = 0;
-					resizeTerminal = TRUE;
-					break;
+				switch (ch) {
+					case 's':
+						if(bs > 0) bs--;
+						resizeTerminal = TRUE;
+						break;
+					case 'a':
+						bs++;
+						resizeTerminal = TRUE;
+						break;
+					case 65:    // key up
+						sens = sens * 1.05;
+						break;
+					case 66:    // key down
+						sens = sens * 0.95;
+						break;
+					case 68:    // key right
+						bw++;
+						resizeTerminal = TRUE;
+						break;
+					case 67:    // key left
+						if (bw > 1) bw--;
+						resizeTerminal = TRUE;
+						break;
+					case 'm':
+						if (mode == modes) {
+							mode = 1;
+						} else {
+							mode++;
+						}
+						break;
+					case 'r': //reload config
+						should_reload = 1;
+						break;
+					case 'c': //change forground color
+						if (col < 7) col++;
+						else col = 0;
+						resizeTerminal = TRUE;
+						break;
+					case 'b': //change backround color
+						if (bgcol < 7) bgcol++;
+						else bgcol = 0;
+						resizeTerminal = TRUE;
+						break;
 
-				case 'q':
-					cleanup();
-					return EXIT_SUCCESS;
+					case 'q':
+						cleanup();
+						return EXIT_SUCCESS;
+				}
 			}
+			#ifdef XLIB
+			if(om == 5)
+			{
+				switch(get_window_input_x(&should_reload, &bs, &sens, &bw, &modes, &mode, &w, &h, color, bcolor, gradient))
+				{
+					case -1:
+						cleanup();
+						return EXIT_SUCCESS;
+					case 1:
+						cleanup();
+						break;
+					case 2:
+						resizeTerminal = TRUE;
+						break;
+				}
+			}
+			#endif
+			#ifdef SDL
+			if(om == 6) 
+			{
+				switch(get_window_input_sdl(&bs, &bw, &sens, &mode, modes, &col, &bgcol, &w, &h, gradient))
+				{
+					case -1:
+						cleanup();
+						exit(EXIT_FAILURE);
+						break;
+					case 1:
+						should_reload = 1;
+						cleanup();
+						break;
+					case 2:
+						resizeTerminal = 1;
+						break;
+				}
+			}
+			#endif
 
 			if (should_reload) {
 
 				reloadConf = TRUE;
 				resizeTerminal = TRUE;
 				should_reload = 0;
-
 			}
 
 			//if (cont == 0) break;
@@ -1120,12 +1257,25 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 			//autmatic sens adjustment
 			if (autosens && om != 4) {
 				for (o = 0; o < bars; o++) {
-					if (f[o] > height * 8 + height * 8 * overshoot / 100) {
-						senseLow = FALSE;
-						sens = sens * 0.99;
-						break;
+					// Sens for graphical modes
+					if((om == 5) | (om == 6)){
+						if (f[o] > height + height * overshoot / 100) {
+							senseLow = FALSE;
+							sens = sens * 0.99;
+							break;
+						}
+						if (senseLow && !silence) sens = sens * 1.01;
 					}
-					if (senseLow && !silence) sens = sens * 1.01;		
+					else
+					{
+						// Sens for console modes
+						if (f[o] > height * 8 + height * 8 * overshoot / 100) {
+							senseLow = FALSE;
+							sens = sens * 0.99;
+							break;
+						}
+						if (senseLow && !silence) sens = sens * 1.01;
+					}
 				}
 			}
 
@@ -1148,6 +1298,24 @@ as of 0.4.0 all options are specified in config file, see in '/home/username/.co
 					case 4:
 						rc = print_raw_out(bars, fp, is_bin, bit_format, ascii_range, bar_delim, frame_delim,f);
 						break;
+					case 5:
+					{
+						#ifdef XLIB
+						// this prevents invalid access
+						if(reloadConf)
+							break;
+						
+						draw_graphical_x(h, bars, bw, bs, rest, gradient, f, flastd);
+						break;
+						#endif
+					}
+					case 6:
+					{
+						#ifdef SDL
+						if(!resizeTerminal) draw_graphical_sdl(bars, rest, bw, bs, f, flastd, col, bgcol, gradient);
+						break;
+						#endif
+					}
 				}
 
 				if (rc == -1) resizeTerminal = TRUE; //terminal has been resized breaking to recalibrating values
